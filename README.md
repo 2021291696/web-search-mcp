@@ -1,66 +1,41 @@
 # web-search-mcp — AI 驱动联网搜索
 
-专为 **Claude Code + DeepSeek** 等无联网功能的 API 设计。**只设一个环境变量就能用**，AI 自己去搜索。
+专为 **Claude Code + DeepSeek** 等无联网功能的 API 设计。**设一个环境变量即用**。
 
-## 后端（任选一个）
-
-| 后端 | 设什么 | 费用 | 适合 |
-|------|--------|------|------|
-| **智谱 GLM** | `GLM_API_KEY` | 按量付费，便宜 | 🇨🇳 国内首选 |
-| **Perplexity** | `PERPLEXITY_API_KEY` | 付费，有试用 | 🌍 国际首选 |
-| **OpenRouter** | `OPENROUTER_API_KEY` | 按量付费 | 🔀 想用 Gemini/Claude 等 |
-| **DuckDuckGo** | 无 | 免费 | 🆓 零配置兜底 |
-
-## 安装
+## 快速开始
 
 ```powershell
-# 1. 克隆
 git clone https://github.com/2021291696/web-search-mcp.git
 cd web-search-mcp
-
-# 2. 安装依赖
 pip install -r requirements.txt
 ```
 
-## 配置
+## 选一个后端（设一个环境变量即可）
 
-### 🇨🇳 国内用户 → 智谱 GLM（推荐）
+### 🇨🇳 国内
 
-```powershell
-# 1. 注册获取 Key: https://open.bigmodel.cn/
-# 2. 设置环境变量
-setx GLM_API_KEY "your-key-here"
-# 3. 重启终端
-```
+| 后端 | 环境变量 | 注册地址 |
+|------|----------|----------|
+| **智谱 GLM** | `GLM_API_KEY` | [open.bigmodel.cn](https://open.bigmodel.cn) |
+| **通义千问** | `DASHSCOPE_API_KEY` | [dashscope.aliyun.com](https://dashscope.aliyun.com) |
+| **Kimi** | `MOONSHOT_API_KEY` | [platform.moonshot.cn](https://platform.moonshot.cn) |
+| **硅基流动**（模型超市） | `SILICONFLOW_API_KEY` | [siliconflow.cn](https://siliconflow.cn) |
+| **DeepSeek 平台** | `DEEPSEEK_API_KEY` | [platform.deepseek.com](https://platform.deepseek.com) |
 
-智谱 GLM-4-Flash 自带联网搜索，OPENAI 兼容接口，开箱即用。
+### 🌍 国际
 
-### 🌍 国际用户 → Perplexity
+| 后端 | 环境变量 | 说明 |
+|------|----------|------|
+| **Perplexity** | `PERPLEXITY_API_KEY` | AI 原生搜索，质量最高 |
+| **Gemini** | `GEMINI_API_KEY` | Google 搜索原生集成，质量最高，有免费额度 |
+| **Brave** | `BRAVE_API_KEY` | 传统搜索 API，免费 2000次/月 |
+| **OpenRouter** | `OPENROUTER_API_KEY` | 模型超市，可按需切换 |
 
-```powershell
-# 1. https://www.perplexity.ai/ → API → 获取 Key
-setx PERPLEXITY_API_KEY "your-key"
-```
+### 🆓 兜底
 
-Perplexity Sonar 专注 AI 搜索，结果质量高。
+什么都不设 → **DuckDuckGo**，免费，零配置。
 
-### 🔀 想自由选模型 → OpenRouter
-
-```powershell
-setx OPENROUTER_API_KEY "your-key"
-:: 默认用 Gemini 2.5 Flash（有联网能力）
-:: 可以自定义：setx OPENROUTER_MODEL "anthropic/claude-sonnet-4.6"
-```
-
-OpenRouter 聚合了 Gemini、Claude、GPT 等，可以按需选模型。
-
-### 🆓 都不设 → DuckDuckGo 免费兜底
-
-不设任何 Key 也能用，启动时会提示升级选项。
-
-## 配置 CC 的 MCP 入口
-
-在 `.mcp.json` 中添加：
+## 配置 CC
 
 ```json
 {
@@ -74,19 +49,9 @@ OpenRouter 聚合了 Gemini、Claude、GPT 等，可以按需选模型。
 }
 ```
 
-## 工具
+## 工作原理
 
-- `web_search` — 搜索网页
-- `web_fetch` — 抓取网页内容
-
-## 故障排查
-
-| 问题 | 解决 |
-|------|------|
-| GLM 搜不出来 | 确认用的 model 支持 web_search，设为 `glm-4-flash` |
-| 智谱 Key 在哪 | https://open.bigmodel.cn/ → API Keys |
-| OpenRouter 联网 | 需模型本身支持联网，Gemini/Claude 可以 |
-| 什么都不想配 | 用 DuckDuckGo，零配置 |
+设了哪个 Key 就用哪个后端。多个 Key 都设了按优先级（国内优先，质量高的优先）。AI 自己调搜索引擎、读网页、返回结构化结果。用户只负责注册拿 Key。
 
 ## License
 
