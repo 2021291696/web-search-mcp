@@ -1,14 +1,14 @@
 """
-Web Search MCP Server — 多后端联网搜索
-=========================================
+Web Search MCP Server — AI 驱动的联网搜索
+============================================
 专为 Claude Code + DeepSeek 用户设计。
-自动检测最优后端，零配置可用。
+通过调用有联网能力的 AI 模型 API 实现搜索，无需自部署。
 
 后端优先级（自动检测环境变量）：
-  1. Perplexity  — AI 驱动的搜索，需 PERPLEXITY_API_KEY
-  2. Brave       — 高质量搜索 API，需 BRAVE_API_KEY
-  3. SearXNG     — 自托管，隐私友好，需 SEARXNG_URL
-  4. DuckDuckGo  — 免费免 Key，默认兜底
+  1. Zhipu GLM  — 智谱，国内首选，OPENAI 兼容接口 + GLM_API_KEY
+  2. Perplexity  — 国际 AI 搜索，PERPLEXITY_API_KEY
+  3. OpenRouter  — 聚合多模型，含联网版 Claude/GPT，OPENROUTER_API_KEY
+  4. DuckDuckGo — 免费免 Key，默认兜底
 
 Provides: web_search(query, max_results) and web_fetch(url, prompt)
 """
@@ -17,6 +17,7 @@ import json
 import os
 import sys
 import asyncio
+import re
 from mcp.server import Server
 from mcp.server.stdio import stdio_server
 from mcp.types import Tool, TextContent
@@ -26,20 +27,19 @@ server = Server("web-search")
 # ─── 后端检测 ───────────────────────────────────────────────────────
 
 def detect_backend() -> str:
-    """按优先级检测可用后端"""
+    if os.environ.get("GLM_API_KEY"):
+        return "zhipu"
     if os.environ.get("PERPLEXITY_API_KEY"):
         return "perplexity"
-    if os.environ.get("BRAVE_API_KEY"):
-        return "brave"
-    if os.environ.get("SEARXNG_URL"):
-        return "searxng"
+    if os.environ.get("OPENROUTER_API_KEY"):
+        return "openrouter"
     return "duckduckgo"
 
 BACKEND = detect_backend()
 BACKEND_LABELS = {
+    "zhipu": "Zhipu GLM (智谱)",
     "perplexity": "Perplexity AI",
-    "brave": "Brave Search",
-    "searxng": "SearXNG",
+    "openrouter": "OpenRouter",
     "duckduckgo": "DuckDuckGo (Free)",
 }
 
@@ -91,8 +91,110 @@ async def list_tools():
 
 # ─── 搜索后端实现 ─────────────────────────────────────────────────────
 
+def _call_openai_compatible(base_url: str, api_key: str, model: str, messages: list,
+                            tools: list = None, max_tokens: int = 1024) -> str:
+    """通用 OPENAI 兼容接口调用"""
+    import urllib.request
+
+    body = {
+        "model": model,
+        "messages": messages,
+        "max_tokens": max_tokens,
+    }
+    if tools:
+        body["tools"] = tools
+        body["tool_choice"] = "auto"
+
+    req = urllib.request.Request(
+        f"{base_url.rstrip('/')}/chat/completions",
+        data=json.dumps(body).encode("utf-8"),
+        headers={
+            "Authorization": f"Bearer {api_key}",
+            "Content-Type": "application/json",
+        },
+    )
+
+    with urllib.request.urlopen(req, timeout=60) as resp:
+        data = json.loads(resp.read())
+
+    return data["choices"][0]["message"]["content"]
+
+
+def search_zhipu(query: str, max_results: int = 5) -> list[dict]:
+    """智谱 GLM — 国内首选，OPENAI 兼容接口，支持联网搜索"""
+    api_key = os.environ.get("GLM_API_KEY", "")
+    base_url = os.environ.get("GLM_BASE_URL", "https://open.bigmodel.cn/api/paas/v4")
+    model = os.environ.get("GLM_MODEL", "glm-4-flash")
+
+    if not api_key:
+        raise RuntimeError("GLM_API_KEY not set. Get one at https://open.bigmodel.cn/")
+
+    # 智谱的 web_search 通过 tools 机制触发
+    result = _call_openai_compatible(
+        base_url=base_url,
+        api_key=api_key,
+        model=model,
+        messages=[
+            {"role": "system", "content": "你是一个搜索助手。搜索并返回结果，每条包含标题、URL和摘要。格式：\n1. **标题**\n   URL: 链接\n   摘要"},
+            {"role": "user", "content": f"搜索：{query}\n\n请返回最多{max_results}条结果，每条包含标题、URL和摘要。"},
+        ],
+        tools=[{
+            "type": "web_search",
+            "web_search": {
+                "search_query": query,
+                "search_result": True,
+            },
+        }],
+    )
+
+    # 解析智谱返回的搜索结果
+    return _parse_search_text(result, max_results)
+
+
+def search_perplexity(query: str, max_results: int = 5) -> list[dict]:
+    """Perplexity — 国际 AI 搜索，质量高"""
+    api_key = os.environ.get("PERPLEXITY_API_KEY", "")
+    if not api_key:
+        raise RuntimeError("PERPLEXITY_API_KEY not set. Get one at https://www.perplexity.ai/")
+
+    result = _call_openai_compatible(
+        base_url="https://api.perplexity.ai",
+        api_key=api_key,
+        model=os.environ.get("PERPLEXITY_MODEL", "sonar-pro"),
+        messages=[
+            {"role": "system", "content": "Search the web and return results as a numbered list. Include title, URL, and snippet for each result."},
+            {"role": "user", "content": query},
+        ],
+    )
+
+    return _parse_search_text(result, max_results)
+
+
+def search_openrouter(query: str, max_results: int = 5) -> list[dict]:
+    """OpenRouter — 聚合平台，可调用多种联网模型"""
+    api_key = os.environ.get("OPENROUTER_API_KEY", "")
+    # 支持用户自定义模型，默认用 Gemini（有联网能力）
+    model = os.environ.get("OPENROUTER_MODEL", "google/gemini-2.5-flash")
+
+    if not api_key:
+        raise RuntimeError("OPENROUTER_API_KEY not set. Get one at https://openrouter.ai/")
+
+    result = _call_openai_compatible(
+        base_url="https://openrouter.ai/api/v1",
+        api_key=api_key,
+        model=model,
+        messages=[
+            {"role": "system", "content": "Search the web and return results as a numbered list. Include title, URL, and snippet for each result. Search the web first, then summarize."},
+            {"role": "user", "content": query},
+        ],
+        max_tokens=2048,
+    )
+
+    return _parse_search_text(result, max_results)
+
+
 def search_duckduckgo(query: str, max_results: int = 5) -> list[dict]:
-    """DuckDuckGo — 免费免注册，全球可用（国内需梯子）"""
+    """DuckDuckGo — 免费免注册，兜底方案"""
     try:
         from duckduckgo_search import DDGS
     except ImportError:
@@ -107,99 +209,30 @@ def search_duckduckgo(query: str, max_results: int = 5) -> list[dict]:
     ]
 
 
-def search_brave(query: str, max_results: int = 5) -> list[dict]:
-    """Brave Search API — 免费 2000次/月，注册: https://brave.com/search/api/"""
-    api_key = os.environ.get("BRAVE_API_KEY", "")
-    if not api_key:
-        raise RuntimeError("BRAVE_API_KEY not set")
-
-    import urllib.request
-    import urllib.parse
-
-    url = "https://api.search.brave.com/res/v1/web/search"
-    params = urllib.parse.urlencode({"q": query, "count": min(max_results, 20)})
-    req = urllib.request.Request(f"{url}?{params}")
-    req.add_header("Accept", "application/json")
-    req.add_header("X-Subscription-Token", api_key)
-
-    with urllib.request.urlopen(req, timeout=10) as resp:
-        data = json.loads(resp.read())
-
+def _parse_search_text(text: str, max_results: int) -> list[dict]:
+    """从 AI 回复中解析搜索结果"""
     results = []
-    for r in (data.get("web", {}).get("results", [])):
-        results.append({
-            "title": r.get("title", "N/A"),
-            "url": r.get("url", "N/A"),
-            "snippet": r.get("description", "")[:300],
-        })
-    return results[:max_results]
 
+    # 尝试匹配编号格式：1. **Title**\n   URL: xxx\n   Snippet
+    pattern = r'(?:\d+[\.\)]\s*)?\*\*(.+?)\*\*\s*\n\s*(?:URL|url|链接)?[：:]\s*(\S+)\s*\n\s*(.*?)(?=\n\d+[\.\)]|\n\*\*|\Z)'
+    matches = re.findall(pattern, text, re.DOTALL)
 
-def search_searxng(query: str, max_results: int = 5) -> list[dict]:
-    """SearXNG — 自托管搜索聚合，可部署在国内/本地，隐私友好"""
-    searxng_url = os.environ.get("SEARXNG_URL", "").rstrip("/")
-    if not searxng_url:
-        raise RuntimeError("SEARXNG_URL not set")
+    for title, url, snippet in matches[:max_results]:
+        if url and url.startswith("http"):
+            results.append({"title": title.strip(), "url": url.strip(), "snippet": snippet.strip()[:300]})
 
-    import urllib.request
-    import urllib.parse
+    if results:
+        return results
 
-    url = f"{searxng_url}/search"
-    params = urllib.parse.urlencode({"q": query, "format": "json", "categories": "general"})
-    req = urllib.request.Request(f"{url}?{params}")
-    req.add_header("User-Agent", "web-search-mcp/2.0")
-
-    with urllib.request.urlopen(req, timeout=10) as resp:
-        data = json.loads(resp.read())
-
-    results = []
-    for r in data.get("results", [])[:max_results]:
-        results.append({
-            "title": r.get("title", "N/A"),
-            "url": r.get("url", "N/A"),
-            "snippet": r.get("content", "")[:300],
-        })
-    return results
-
-
-def search_perplexity(query: str, max_results: int = 5) -> list[dict]:
-    """Perplexity AI — 智能搜索+总结，需付费 API Key"""
-    api_key = os.environ.get("PERPLEXITY_API_KEY", "")
-    if not api_key:
-        raise RuntimeError("PERPLEXITY_API_KEY not set")
-
-    import urllib.request
-
-    # Use Perplexity's online model for search
-    req = urllib.request.Request(
-        "https://api.perplexity.ai/chat/completions",
-        data=json.dumps({
-            "model": "sonar-pro",
-            "messages": [
-                {"role": "system", "content": "Search the web and return results as a list. Include title, URL, and snippet for each."},
-                {"role": "user", "content": query},
-            ],
-            "max_tokens": 1024,
-        }).encode(),
-        headers={
-            "Authorization": f"Bearer {api_key}",
-            "Content-Type": "application/json",
-        },
-    )
-
-    with urllib.request.urlopen(req, timeout=30) as resp:
-        data = json.loads(resp.read())
-
-    # Perplexity returns text, not structured results — return as single result
-    text = data["choices"][0]["message"]["content"]
-    return [{"title": f"Perplexity: {query[:80]}", "url": "", "snippet": text}]
+    # 如果没匹配到结构化结果，返回原始文本作为单条
+    return [{"title": "Search result", "url": "", "snippet": text[:1000]}]
 
 
 SEARCH_BACKENDS = {
-    "duckduckgo": search_duckduckgo,
-    "brave": search_brave,
-    "searxng": search_searxng,
+    "zhipu": search_zhipu,
     "perplexity": search_perplexity,
+    "openrouter": search_openrouter,
+    "duckduckgo": search_duckduckgo,
 }
 
 # ─── 工具调用 ────────────────────────────────────────────────────────
@@ -213,13 +246,11 @@ async def call_tool(name: str, arguments: dict):
         try:
             results = SEARCH_BACKENDS[BACKEND](query, max_results)
         except RuntimeError as e:
-            # Missing dependency or config — try fallback to DDG
             if BACKEND != "duckduckgo":
                 try:
                     results = search_duckduckgo(query, max_results)
                 except Exception:
-                    return [TextContent(type="text", text=f"Search error: {e}\n\n"
-                        "Tip: DuckDuckGo is the free default. Make sure 'pip install duckduckgo-search' is installed.")]
+                    return [TextContent(type="text", text=f"Search error: {e}")]
             else:
                 return [TextContent(type="text", text=f"Search error: {e}")]
 
@@ -246,16 +277,14 @@ async def call_tool(name: str, arguments: dict):
             req.add_header("User-Agent",
                 "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36")
             with urllib.request.urlopen(req, timeout=15) as r:
-                content_type = r.headers.get("Content-Type", "")
                 raw = r.read()
 
-            # Decode
+            content_type = r.headers.get("Content-Type", "")
             encoding = "utf-8"
             if "charset=" in content_type:
                 encoding = content_type.split("charset=")[-1].split(";")[0].strip()
             html = raw.decode(encoding, errors="replace")
 
-            # Simple HTML-to-text
             try:
                 from bs4 import BeautifulSoup
                 soup = BeautifulSoup(html, "html.parser")
@@ -263,8 +292,6 @@ async def call_tool(name: str, arguments: dict):
                     tag.decompose()
                 text = soup.get_text(separator="\n", strip=True)
             except ImportError:
-                # Fallback: basic regex stripping
-                import re
                 text = re.sub(r"<script[^>]*>[\s\S]*?</script>", "", html, flags=re.IGNORECASE)
                 text = re.sub(r"<style[^>]*>[\s\S]*?</style>", "", text, flags=re.IGNORECASE)
                 text = re.sub(r"<[^>]+>", " ", text)
@@ -287,9 +314,17 @@ async def main():
 
 
 if __name__ == "__main__":
-    # Startup info
     print(f"[web-search] Backend: {BACKEND_LABELS[BACKEND]}", file=sys.stderr)
     if BACKEND == "duckduckgo":
-        print("[web-search] Tip: Set BRAVE_API_KEY for higher quality search (free 2000/mo)", file=sys.stderr)
-        print("[web-search] Tip: Set SEARXNG_URL for self-hosted search (China-friendly)", file=sys.stderr)
+        print("[web-search] ======================================", file=sys.stderr)
+        print("[web-search]   Zero config mode (DuckDuckGo Free)", file=sys.stderr)
+        print("[web-search] ======================================", file=sys.stderr)
+        print("[web-search]", file=sys.stderr)
+        print("[web-search]   Upgrade options (just set one env var):", file=sys.stderr)
+        print("[web-search]   🇨🇳 国内 → setx GLM_API_KEY \"your-key\"", file=sys.stderr)
+        print("[web-search]       注册: https://open.bigmodel.cn/", file=sys.stderr)
+        print("[web-search]   🌍 Global → setx PERPLEXITY_API_KEY \"your-key\"", file=sys.stderr)
+        print("[web-search]       注册: https://www.perplexity.ai/", file=sys.stderr)
+        print("[web-search]   🔀 Universal → setx OPENROUTER_API_KEY \"your-key\"", file=sys.stderr)
+        print("[web-search]       注册: https://openrouter.ai/", file=sys.stderr)
     asyncio.run(main())
